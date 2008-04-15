@@ -1,0 +1,6 @@
+author: Mathieu Fosse
+summary: Aims to use Mootools javascript framework insted of Prototype/Script.aculo.us (by default with Ruby On Rails).
+homepage: http://mootoolsonrails.kawooa.org
+plugin: http://svn.kawooa.org/svn/plugins/mootools_on_rails
+license: MIT
+version: 0.1
