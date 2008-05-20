@@ -257,17 +257,34 @@ module ActionView
             
             def to_s #:nodoc:
               returning javascript = @lines * $/ do
-                # if ActionView::Base.debug_rjs
-                #                   source = javascript.dup
-                #                   javascript.replace "try {\n#{source}\n} catch (e) "
-                #                   javascript << "{ alert('RJS error:\\n\\n' + e.toString()); alert('#{source.gsub('\\','\0\0').gsub(/\r\n|\n|\r/, "\\n").gsub(/["']/) { |m| "\\#{m}" }}'); throw e }"
-                #                 end
+                if ActionView::Base.debug_rjs
+                  source = javascript.dup
+                  javascript.replace "try {\n#{source}\n} catch (e) "
+                  javascript << "{ alert('RJS error:\\n\\n' + e.toString()); alert('#{source.gsub('\\','\0\0').gsub(/\r\n|\n|\r/, "\\n").gsub(/["']/) { |m| "\\#{m}" }}'); throw e }"
+                end
               end
             end
             
+            # Insert an element (before, after) an other
+            # NOTE : This method use mootools_patch.js
             def insert_html(position, id, *options_for_render)
               insertion = position.to_s.camelize
-              record "$('#{id}').inject#{insertion}('#{render(*options_for_render)}')"
+              call "$('#{id}').append#{insertion}", render(*options_for_render)
+            end
+            
+            # Replace an element
+            def replace(id, *options_for_render)
+              call "$('#{id}').replace", render(*options_for_render)
+            end            
+            
+            # Replace the content of an element
+            def replace_html(id, *options_for_render)
+              call "$('#{id}').set", {:html => render(*options_for_render)}
+            end
+            
+            # Highlight an element
+            def highlight(id, start_color='#FF8', end_color=nil)
+              call("$('#{id}').highlight", *[start_color, end_color].compact)
             end
             
             # Shows hidden DOM elements with the given +ids+.
@@ -285,6 +302,12 @@ module ActionView
               call 'alert', message
             end
                         
+            # Fire an event
+            # TODO [mathieu] : with another element than 'window'
+            def fire_event(event)
+              call 'document.fireEvent', event
+            end          
+                        
             # Calls the JavaScript +function+, optionally with the given +arguments+.
             #
             # If a block is given, the block will be passed to a new JavaScriptGenerator;
@@ -297,6 +320,10 @@ module ActionView
             # Assigns the JavaScript +variable+ the given +value+.
             def assign(variable, value)
               record "#{variable} = #{javascript_object_for(value)}"
+            end
+            
+            def redirect_to(location)
+              assign 'window.location.href', @context.url_for(location)
             end
 
             # Writes raw JavaScript to the page.
@@ -372,17 +399,12 @@ module ActionView
         JavaScriptGenerator.new(@template, &block).to_s
       end
 
-
       def remote_function(options)
         javascript_options = options_for_ajax(options)
 
-        function = "new Ajax("
+        request_type = options[:request_type].blank? ? "" : ".#{options[:request_type].to_s.upcase}"
 
-        url_options = options[:url]
-        url_options = url_options.merge(:escape => false) if url_options.is_a?(Hash)
-        function << "'#{url_for(url_options)}'"
-        function << ", #{javascript_options}).request()"
-
+        function = "new Request#{request_type}(#{javascript_options}).send()"
         function = "#{options[:before]}; #{function}" if options[:before]
         function = "#{function}; #{options[:after]}"  if options[:after]
         function = "if (#{options[:condition]}) { #{function}; }" if options[:condition]
@@ -392,19 +414,18 @@ module ActionView
       end
 
       def form_remote_tag(options = {}, &block)
+        options[:form] = true
+        options[:data] = ""
+
+        request_type = options[:request_type].blank? ? "" : ".#{options[:request_type].to_s.upcase}"
+        
         options[:html] ||= {}
         options[:html][:onsubmit] = 
         (options[:html][:onsubmit] ? options[:html][:onsubmit] + "; " : "") + 
-        "this.send(#{options_for_ajax(options)}); return false;"
+        "new Request#{request_type}($merge({data: this.toQueryString()}, #{options_for_ajax(options)})).send(); return false;"
 
         form_tag(options[:html].delete(:action) || url_for(options[:url]), options[:html], &block)
       end     
-      
-      
-      # def add_event_with_domready(id, event, script=nil, &block)
-      #   add_event(:window, 'domready', add_event(id, event, script, &block))
-      # end
-      
 
       def dom_ready(script=nil)
         js =  "window.addEvent('domready', function() {"
@@ -424,27 +445,39 @@ module ActionView
 
       protected
       
-      
-
       def options_for_ajax(options)
-        js_options = build_callbacks(options)
+        # FIXME (Did): callbacks are different from Prototype ones: before, we had: js_options = build_callbacks(options)
+        js_options = {}
 
+        url_options = options[:url]
+        url_options = url_options.merge(:escape => false) if url_options.is_a?(Hash)
+        js_options['url']          = "'#{url_for(url_options)}'"
         js_options['method']       = method_option_to_s(options[:method]) if options[:method]
         js_options['evalScripts']  = options[:script].nil? || options[:script]
         js_options['update']       = "$('#{options[:update]}')" if options[:update]
-        
-        if protect_against_forgery?
-          if js_options['data']
-            js_options['data'] << " + '&"
+        js_options['onSuccess']    = "function(responseText, responseXML) { #{options[:success]} }" unless options[:success].blank?
+        js_options['onFailure']    = "function(args) { #{options[:failure]} }" unless options[:failure].blank?
+
+        # actually, only for Request.HTML requests type.
+        js_options['onComplete']   =  "function(responseTree, responseElements, responseHTML, responseJavaScript) { #{options[:complete]} }" unless options[:complete].blank?
+
+        unless options[:form]
+          if protect_against_forgery?
+            if options[:data]
+              js_options['data'] = "#{options[:data]} + '&' + "
+            else
+              js_options['data'] = ""
+            end
+            js_options['data'] << "'#{request_forgery_protection_token}=' + encodeURIComponent('#{escape_javascript form_authenticity_token}')"
           else
-            js_options['data'] = "'"
+            js_options['data'] = "#{options[:data]}" unless options[:data].blank?
           end
-          js_options['data'] << "#{request_forgery_protection_token}=' + encodeURIComponent('#{escape_javascript form_authenticity_token}')"
         end
 
         options_for_javascript(js_options)
       end
       
+      # DEPRECATED: should not be used (mootools callbacks different from Prototype ones)      
       def build_callbacks(options)
         callbacks = {}
         options.each do |callback, code|
@@ -454,6 +487,10 @@ module ActionView
           end
         end
         callbacks
+      end
+      
+      def method_option_to_s(method) 
+        (method.is_a?(String) and !method.index("'").nil?) ? method : "'#{method}'"
       end
     end
   end
